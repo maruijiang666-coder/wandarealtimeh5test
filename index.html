@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>实时对话测试</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎙️</text></svg>">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 10px;
+      padding: 20px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    
+    h1 {
+      margin-bottom: 20px;
+      color: #333;
+    }
+    
+    .status {
+      padding: 10px;
+      margin-bottom: 20px;
+      border-radius: 5px;
+      background: #f0f0f0;
+    }
+    
+    .status.connected {
+      background: #d4edda;
+      color: #155724;
+    }
+    
+    .controls {
+      margin-bottom: 20px;
+    }
+    
+    button {
+      padding: 10px 20px;
+      margin-right: 10px;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    
+    .btn-connect {
+      background: #007bff;
+      color: white;
+    }
+    
+    .btn-disconnect {
+      background: #dc3545;
+      color: white;
+    }
+    
+    .btn-upload {
+      background: #28a745;
+      color: white;
+    }
+    
+    .btn-record {
+      background: #28a745;
+      color: white;
+      font-weight: bold;
+    }
+    
+    .btn-record.recording {
+      background: #dc3545;
+      animation: recordPulse 1s infinite;
+    }
+    
+    .btn-continuous {
+      background: #17a2b8;
+      color: white;
+      font-weight: bold;
+    }
+    
+    .btn-continuous.recording {
+      background: #dc3545;
+      animation: recordPulse 1s infinite;
+    }
+    
+    @keyframes recordPulse {
+      0%, 100% {
+        box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.7);
+      }
+      50% {
+        box-shadow: 0 0 0 10px rgba(220, 53, 69, 0);
+      }
+    }
+    
+    .btn-test {
+      background: #ffc107;
+      color: #333;
+    }
+    
+    .response-box {
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      padding: 15px;
+      min-height: 300px;
+      max-height: 500px;
+      overflow-y: auto;
+      background: #fafafa;
+    }
+    
+    .message {
+      margin-bottom: 10px;
+      padding: 8px 12px;
+      border-radius: 5px;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    
+    .message .time {
+      color: #999;
+      font-size: 12px;
+      margin-right: 8px;
+    }
+    
+    .message.system {
+      background: #e3f2fd;
+      color: #1976d2;
+    }
+    
+    .message.response {
+      background: #f1f8e9;
+      color: #558b2f;
+    }
+    
+    .message.error {
+      background: #ffebee;
+      color: #c62828;
+      font-weight: bold;
+    }
+    
+    .message.text {
+      background: #fff3e0;
+      color: #e65100;
+      font-weight: bold;
+    }
+    
+    .message.transcript {
+      background: #f3e5f5;
+      color: #7b1fa2;
+      font-style: italic;
+    }
+    
+    .message.text-stream {
+      background: #fff9c4;
+      color: #f57f17;
+      font-weight: bold;
+      border-left: 4px solid #fbc02d;
+    }
+    
+    .typing {
+      color: #999;
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎙️ 实时对话测试</h1>
+    
+    <div class="status" id="status">
+      状态: 未连接
+    </div>
+    
+    <div class="controls">
+      <button class="btn-connect" id="connectBtn">连接</button>
+      <button class="btn-disconnect" id="disconnectBtn" disabled>断开</button>
+      <button class="btn-upload" id="uploadBtn" disabled>
+        📁 上传音频
+      </button>
+      <button class="btn-record" id="recordBtn" disabled>
+        🎤 开始录音
+      </button>
+      <button class="btn-continuous" id="continuousRecordBtn" disabled>
+        🔄 持续录音
+      </button>
+      <button class="btn-test" id="testBtn" disabled>测试连接</button>
+      <input type="file" id="fileInput" accept="audio/*" style="display: none;">
+    </div>
+    
+    <div class="response-box" id="responseBox">
+      <div class="message system">等待连接...</div>
+    </div>
+  </div>
+  
+  <script src="app.js"></script>
+</body>
+</html>
