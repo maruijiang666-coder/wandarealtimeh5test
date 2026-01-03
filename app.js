@@ -1,3 +1,31 @@
+const WORKLET_CODE = `
+class AudioProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.bufferSize = 2048;
+    this.buffer = new Float32Array(this.bufferSize);
+    this.bufferIndex = 0;
+  }
+
+  process(inputs, outputs, parameters) {
+    const input = inputs[0];
+    if (!input || !input.length) return true;
+    
+    const channelData = input[0];
+    for (let i = 0; i < channelData.length; i++) {
+      this.buffer[this.bufferIndex++] = channelData[i];
+      
+      if (this.bufferIndex >= this.bufferSize) {
+        this.port.postMessage(this.buffer);
+        this.bufferIndex = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('audio-processor', AudioProcessor);
+`;
+
 class RealtimeClient {
   constructor() {
     this.ws = null;
@@ -9,6 +37,12 @@ class RealtimeClient {
     this.currentAudioChunks = [];
     this.currentTranscript = '';
     this.isRecording = false;
+
+    // 播放队列相关
+    this.audioQueue = [];
+    this.isPlaying = false;
+    this.playbackContext = null;
+    this.nextStartTime = 0;
     
     // 录音相关
     this.isRecording = false;
@@ -402,6 +436,12 @@ class RealtimeClient {
         this.currentTextResponse = '';
         this.currentAudioChunks = [];
         this.currentTranscript = '';
+        // 重置播放时间戳，准备新一轮对话
+        if (this.playbackContext) {
+            // 如果已经在播放中，可能需要打断（可选），这里简单起见，仅重置时间基准
+            // 为了让新的一句话紧接着当前时间播放，而不是追加在可能很久之前的队列后
+            this.nextStartTime = this.playbackContext.currentTime;
+        }
         break;
         
       case 'response.output_item.added':
@@ -611,89 +651,58 @@ class RealtimeClient {
     }
     
     try {
-      this.log('🎤 启动持续录音模式...', 'system');
+      this.log('🎤 启动持续录音模式 (PCM16)...', 'system');
       
       this.continuousStream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           channelCount: 1,
-          sampleRate: 48000
+          sampleRate: 16000
         } 
       });
       
       this.log('✓ 麦克风权限已获取', 'system');
       
-      // 使用支持的音频格式
-      let mimeType = '';
-      const formats = ['audio/webm', 'audio/ogg', 'audio/mp4'];
+      this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
+        sampleRate: 16000
+      });
+
+      const blob = new Blob([WORKLET_CODE], { type: 'application/javascript' });
+      const workletUrl = URL.createObjectURL(blob);
       
-      for (const format of formats) {
-        if (MediaRecorder.isTypeSupported(format)) {
-          mimeType = format;
-          this.log(`✓ 使用格式: ${format}`, 'system');
-          break;
-        }
-      }
+      await this.audioContext.audioWorklet.addModule(workletUrl);
       
-      const options = mimeType ? { mimeType } : {};
-      this.continuousMediaRecorder = new MediaRecorder(this.continuousStream, options);
+      const source = this.audioContext.createMediaStreamSource(this.continuousStream);
+      this.workletNode = new AudioWorkletNode(this.audioContext, 'audio-processor');
+      
+      this.workletNode.port.onmessage = (event) => {
+        this.handleAudioBuffer(event.data);
+      };
+      
+      source.connect(this.workletNode);
+      this.workletNode.connect(this.audioContext.destination);
       
       this.isContinuousRecording = true;
       this.continuousRecordBtn.classList.add('recording');
       this.continuousRecordBtn.textContent = '⏹️ 停止持续录音';
       
-      // 持续收集音频数据
-      this.continuousAudioChunks = [];
-      
-      this.continuousMediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          this.continuousAudioChunks.push(event.data);
-        }
-      };
-      
-      // 启动录音，持续收集数据
-      this.continuousMediaRecorder.start();
-      
-      // 每50ms发送这段时间内收集到的所有音频数据
-      this.continuousInterval = setInterval(async () => {
-        if (this.continuousAudioChunks.length > 0) {
-          // 合并这段时间内收集到的所有音频块
-          const audioBlob = new Blob(this.continuousAudioChunks, { type: this.continuousMediaRecorder.mimeType });
-          this.continuousAudioChunks = []; // 清空已发送的数据
-          
-          if (audioBlob.size > 0) {
-            const arrayBuffer = await audioBlob.arrayBuffer();
-            const base64 = this.arrayBufferToBase64(arrayBuffer);
-            
-            const message = {
-              model_type: 'stepfun',
-              sess_id: this.sessId,
-              audio: base64
-            };
-            
-            this.ws.send(JSON.stringify(message));
-            this.log(`📤 发送音频块 (${audioBlob.size} 字节)`, 'system');
-          }
-        }
-      }, 50);
-      
-      this.log('🔴 持续录音中，每50ms发送收集到的音频数据...', 'system');
+      this.log('🔴 持续录音中...', 'system');
       
     } catch (error) {
       console.error('持续录音失败:', error);
       this.log('❌ 无法启动持续录音: ' + error.message, 'error');
-      this.isContinuousRecording = false;
+      this.stopContinuousRecording();
     }
   }
   
   stopContinuousRecording() {
-    if (this.continuousInterval) {
-      clearInterval(this.continuousInterval);
-      this.continuousInterval = null;
+    if (this.workletNode) {
+      this.workletNode.disconnect();
+      this.workletNode = null;
     }
     
-    if (this.continuousMediaRecorder && this.continuousMediaRecorder.state !== 'inactive') {
-      this.continuousMediaRecorder.stop();
-      this.continuousMediaRecorder = null;
+    if (this.audioContext) {
+      this.audioContext.close();
+      this.audioContext = null;
     }
     
     if (this.continuousStream) {
@@ -701,13 +710,43 @@ class RealtimeClient {
       this.continuousStream = null;
     }
     
-    this.continuousAudioChunks = [];
-    
     this.isContinuousRecording = false;
     this.continuousRecordBtn.classList.remove('recording');
     this.continuousRecordBtn.textContent = '🔄 持续录音';
     
     this.log('⏹️ 持续录音已停止', 'system');
+  }
+
+  handleAudioBuffer(float32Array) {
+    // Convert Float32 to Int16
+    const int16Array = new Int16Array(float32Array.length);
+    for (let i = 0; i < float32Array.length; i++) {
+      let s = Math.max(-1, Math.min(1, float32Array[i]));
+      int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    
+    // Convert to Base64
+    const base64 = this.arrayBufferToBase64(int16Array.buffer);
+    
+    // Send to backend
+    if (this.isConnected && this.ws.readyState === WebSocket.OPEN) {
+      const message = {
+        model_type: 'stepfun',
+        sess_id: this.sessId,
+        audio: base64
+      };
+      this.ws.send(JSON.stringify(message));
+
+      // 增加中文日志显示过程
+      this.chunkCount = (this.chunkCount || 0) + 1;
+      // 控制台输出详细信息
+      console.log(`[持续录音] 发送第 ${this.chunkCount} 个数据包, Base64长度: ${base64.length}`);
+      
+      // 界面每发送 8 个包 (约1秒) 显示一次，避免刷屏
+      if (this.chunkCount % 8 === 0) {
+        this.log(`🔄 持续录音中... 已发送 ${this.chunkCount} 个数据包`, 'system');
+      }
+    }
   }
 }
 

@@ -80,6 +80,37 @@
       background: #ffc107;
       color: #333;
     }
+
+    .btn-record {
+      background: #28a745;
+      color: white;
+      font-weight: bold;
+    }
+    
+    .btn-record.recording {
+      background: #dc3545;
+      animation: recordPulse 1s infinite;
+    }
+    
+    .btn-continuous {
+      background: #17a2b8;
+      color: white;
+      font-weight: bold;
+    }
+    
+    .btn-continuous.recording {
+      background: #dc3545;
+      animation: recordPulse 1s infinite;
+    }
+    
+    @keyframes recordPulse {
+      0%, 100% {
+        box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.7);
+      }
+      50% {
+        box-shadow: 0 0 0 10px rgba(220, 53, 69, 0);
+      }
+    }
     
     .response-box {
       border: 1px solid #ddd;
@@ -158,6 +189,8 @@
       <button class="btn-connect" id="connectBtn">连接</button>
       <button class="btn-disconnect" id="disconnectBtn" disabled>断开</button>
       <button class="btn-upload" id="uploadBtn" disabled>上传音频</button>
+      <button class="btn-record" id="recordBtn" disabled>🎤 开始录音</button>
+      <button class="btn-continuous" id="continuousRecordBtn" disabled>🔄 持续录音</button>
       <button class="btn-test" id="testBtn" disabled>测试连接</button>
       <input type="file" id="fileInput" accept="audio/*" style="display: none;">
     </div>
