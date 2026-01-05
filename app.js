@@ -542,11 +542,14 @@ class RealtimeClient {
   async playAudio(base64Chunks) {
     if (!base64Chunks || base64Chunks.length === 0) return;
     
+    // 如果有正在播放的音频，先停止（打断）
+    this.stopAudio();
+    
     this.log('🔊 开始播放音频...', 'system');
     
     try {
       // 创建音频上下文 (24000Hz 是 StepFun 的输出采样率)
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)({
+      this.playbackContext = new (window.AudioContext || window.webkitAudioContext)({
         sampleRate: 24000
       });
       
@@ -580,16 +583,19 @@ class RealtimeClient {
       }
       
       // 创建音频缓冲区
-      const audioBuffer = audioContext.createBuffer(1, float32.length, 24000);
+      const audioBuffer = this.playbackContext.createBuffer(1, float32.length, 24000);
       audioBuffer.getChannelData(0).set(float32);
       
       // 播放
-      const source = audioContext.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(audioContext.destination);
-      source.start();
+      this.currentSource = this.playbackContext.createBufferSource();
+      this.currentSource.buffer = audioBuffer;
+      this.currentSource.connect(this.playbackContext.destination);
+      this.currentSource.start();
+      this.isPlaying = true;
       
-      source.onended = () => {
+      this.currentSource.onended = () => {
+        this.isPlaying = false;
+        this.currentSource = null;
         this.log('✓ 音频播放完成', 'system');
       };
       
@@ -598,6 +604,28 @@ class RealtimeClient {
       this.log('❌ 播放失败: ' + error.message, 'error');
     }
   }
+
+  stopAudio() {
+    if (this.currentSource) {
+      try {
+        this.currentSource.stop();
+      } catch (e) {
+        console.warn('停止音频失败:', e);
+      }
+      this.currentSource = null;
+    }
+    
+    if (this.playbackContext && this.playbackContext.state !== 'closed') {
+      try {
+        this.playbackContext.close();
+      } catch (e) {
+        console.warn('关闭音频上下文失败:', e);
+      }
+      this.playbackContext = null;
+    }
+    this.isPlaying = false;
+  }
+
   
   arrayBufferToBase64(buffer) {
     let binary = '';
@@ -651,7 +679,7 @@ class RealtimeClient {
     }
     
     try {
-      this.log('🎤 启动持续录音模式 (PCM16)...', 'system');
+      this.log('🎤 启动持续录音模式 (VAD检测)...', 'system');
       
       this.continuousStream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
@@ -674,8 +702,17 @@ class RealtimeClient {
       const source = this.audioContext.createMediaStreamSource(this.continuousStream);
       this.workletNode = new AudioWorkletNode(this.audioContext, 'audio-processor');
       
+      // VAD State
+      this.vadState = {
+        isSpeaking: false,
+        silenceStart: null,
+        buffer: [],
+        silenceThreshold: 0.01,
+        silenceDuration: 800 // ms
+      };
+      
       this.workletNode.port.onmessage = (event) => {
-        this.handleAudioBuffer(event.data);
+        this.handleVAD(event.data);
       };
       
       source.connect(this.workletNode);
@@ -685,7 +722,7 @@ class RealtimeClient {
       this.continuousRecordBtn.classList.add('recording');
       this.continuousRecordBtn.textContent = '⏹️ 停止持续录音';
       
-      this.log('🔴 持续录音中...', 'system');
+      this.log('🔴 持续录音中 (请说话)...', 'system');
       
     } catch (error) {
       console.error('持续录音失败:', error);
@@ -693,8 +730,56 @@ class RealtimeClient {
       this.stopContinuousRecording();
     }
   }
+
+  handleVAD(float32Array) {
+    if (!this.isContinuousRecording) return;
+    
+    // Calculate RMS
+    let sum = 0;
+    for (let i = 0; i < float32Array.length; i++) {
+      sum += float32Array[i] * float32Array[i];
+    }
+    const rms = Math.sqrt(sum / float32Array.length);
+    
+    const { isSpeaking, silenceThreshold, silenceDuration } = this.vadState;
+    
+    if (rms > silenceThreshold) {
+      // Speech detected
+      if (!isSpeaking) {
+        this.vadState.isSpeaking = true;
+        this.log('🎤 检测到语音开始', 'system');
+        // Interruption
+        this.stopAudio();
+      }
+      this.vadState.silenceStart = null;
+      this.vadState.buffer.push(new Float32Array(float32Array));
+    } else {
+      // Silence
+      if (isSpeaking) {
+        if (!this.vadState.silenceStart) {
+          this.vadState.silenceStart = Date.now();
+        }
+        this.vadState.buffer.push(new Float32Array(float32Array));
+        
+        if (Date.now() - this.vadState.silenceStart > silenceDuration) {
+          // Speech ended
+          this.log('🎤 语音结束，发送数据...', 'system');
+          this.vadState.isSpeaking = false;
+          this.vadState.silenceStart = null;
+          
+          this.sendSpeechBuffer(this.vadState.buffer);
+          this.vadState.buffer = [];
+        }
+      }
+    }
+  }
   
   stopContinuousRecording() {
+    if (this.workletUrl) {
+      URL.revokeObjectURL(this.workletUrl);
+      this.workletUrl = null;
+    }
+
     if (this.workletNode) {
       this.workletNode.disconnect();
       this.workletNode = null;
@@ -717,35 +802,67 @@ class RealtimeClient {
     this.log('⏹️ 持续录音已停止', 'system');
   }
 
-  handleAudioBuffer(float32Array) {
-    // Convert Float32 to Int16
-    const int16Array = new Int16Array(float32Array.length);
-    for (let i = 0; i < float32Array.length; i++) {
-      let s = Math.max(-1, Math.min(1, float32Array[i]));
-      int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  sendSpeechBuffer(chunks) {
+    if (chunks.length === 0) return;
+    
+    // Merge
+    let totalLength = 0;
+    for (const chunk of chunks) totalLength += chunk.length;
+    const combined = new Float32Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      combined.set(chunk, offset);
+      offset += chunk.length;
     }
     
-    // Convert to Base64
-    const base64 = this.arrayBufferToBase64(int16Array.buffer);
+    // Add WAV Header
+    const wavBuffer = this.writeWavHeader(combined, 16000, 1, 16);
     
-    // Send to backend
+    // Base64
+    const base64 = this.arrayBufferToBase64(wavBuffer);
+    
+    // Send
     if (this.isConnected && this.ws.readyState === WebSocket.OPEN) {
-      const message = {
-        model_type: 'stepfun',
-        sess_id: this.sessId,
-        audio: base64
-      };
-      this.ws.send(JSON.stringify(message));
+        const message = {
+            model_type: 'stepfun',
+            sess_id: this.sessId,
+            audio: base64
+        };
+        this.ws.send(JSON.stringify(message));
+        this.log(`📤 发送语音 (${(totalLength/16000).toFixed(2)}s)`, 'system');
+    }
+  }
 
-      // 增加中文日志显示过程
-      this.chunkCount = (this.chunkCount || 0) + 1;
-      // 控制台输出详细信息
-      console.log(`[持续录音] 发送第 ${this.chunkCount} 个数据包, Base64长度: ${base64.length}`);
-      
-      // 界面每发送 8 个包 (约1秒) 显示一次，避免刷屏
-      if (this.chunkCount % 8 === 0) {
-        this.log(`🔄 持续录音中... 已发送 ${this.chunkCount} 个数据包`, 'system');
-      }
+  writeWavHeader(samples, sampleRate, numChannels, bitDepth) {
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+    this.writeString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + samples.length * 2, true);
+    this.writeString(view, 8, 'WAVE');
+    this.writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * numChannels * (bitDepth / 8), true);
+    view.setUint16(32, numChannels * (bitDepth / 8), true);
+    view.setUint16(34, bitDepth, true);
+    this.writeString(view, 36, 'data');
+    view.setUint32(40, samples.length * 2, true);
+    this.floatTo16BitPCM(view, 44, samples);
+    return buffer;
+  }
+  
+  writeString(view, offset, string) {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
+  }
+  
+  floatTo16BitPCM(output, offset, input) {
+    for (let i = 0; i < input.length; i++, offset += 2) {
+      const s = Math.max(-1, Math.min(1, input[i]));
+      output.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
     }
   }
 }
